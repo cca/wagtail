@@ -698,7 +698,7 @@ class Page(six.with_metaclass(PageBase, MP_Node, ClusterableModel, index.Indexed
     @classmethod
     def allowed_subpage_types(cls):
         """
-        Returns the list of page types that this page type can be a subpage of
+        Returns the list of page types that this page type can have as subpages
         """
         # Special case the 'Page' class, such as the Root page or Home page -
         # otherwise you can not add initial pages when setting up a site
@@ -708,6 +708,49 @@ class Page(six.with_metaclass(PageBase, MP_Node, ClusterableModel, index.Indexed
         cls_ct = ContentType.objects.get_for_model(cls)
         return [ct for ct in cls.clean_subpage_types()
                 if cls_ct in ct.model_class().clean_parent_page_types()]
+
+    @classmethod
+    def can_exist_under(cls, parent):
+        """
+        Checks if this page type can exist as a subpage under a parent page
+        instance by checking the :attr:`~Page.parent_page_types` of this class,
+        and the :attr:`~Page.subpage_types` of the parent.
+
+        See also: :func:`Page.can_create_at` and :func:`Page.can_move_to`
+        """
+        if type(parent) is Page:
+            # The root page is always a `Page`. Every page type should be
+            # allowed to exist here - even if their `parent_page_types()` say
+            # otherwise
+            return True
+        cls_ct = ContentType.objects.get_for_model(cls)
+        parent_ct = ContentType.objects.get_for_model(parent.specific_class)
+        return parent.can_have_subpages() \
+            and cls_ct in parent.allowed_subpage_types() \
+            and parent_ct in cls.allowed_parent_page_types()
+
+    @classmethod
+    def can_create_at(cls, parent):
+        """
+        Checks if this page type can be created as a subpage under a parent
+        page instance.
+        """
+        return not cls.is_abstract and not cls._meta.abstract \
+            and cls.can_exist_under(parent)
+
+    def can_move_to(self, parent):
+        """
+        Checks if this page instance can be moved to be a subpage of a parent
+        page instance.
+        """
+        return self.can_exist_under(parent)
+
+    def can_have_subpages(self):
+        """
+        Checks if this page instance can have subpages. A page can have
+        subpages if there are any allowed subpage types.
+        """
+        return bool(self.allowed_subpage_types())
 
     @classmethod
     def get_verbose_name(cls):
@@ -1299,7 +1342,7 @@ class PagePermissionTester(object):
     def can_add_subpage(self):
         if not self.user.is_active:
             return False
-        if not self.page.specific_class.allowed_subpage_types():  # this page model has an empty subpage_types list, so no subpages are allowed
+        if not self.page.specific.can_have_subpages():
             return False
         return self.user.is_superuser or ('add' in self.permissions)
 
@@ -1366,7 +1409,7 @@ class PagePermissionTester(object):
         """
         if not self.user.is_active:
             return False
-        if not self.page.specific_class.allowed_subpage_types():  # this page model has an empty subpage_types list, so no subpages are allowed
+        if not self.page.specific.can_have_subpages():
             return False
 
         return self.user.is_superuser or ('publish' in self.permissions)
@@ -1391,7 +1434,12 @@ class PagePermissionTester(object):
         if self.page == destination or destination.is_descendant_of(self.page):
             return False
 
-        # and shortcut the trivial 'everything' / 'nothing' permissions
+        # reject moves that are forbidden by subpage_types / parent_page_types rules
+        # (these rules apply to superusers too)
+        if not self.page.specific.can_move_to(destination):
+            return False
+
+        # shortcut the trivial 'everything' / 'nothing' permissions
         if not self.user.is_active:
             return False
         if self.user.is_superuser:
